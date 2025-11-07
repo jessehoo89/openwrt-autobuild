@@ -1,26 +1,20 @@
-name: X86-64
+name: X86-64-K6.18
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 15 * * *
+    - cron: 0 16 * * *
 
 env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: openwrt-24.10
-  CONFIG_FILE: configs/x86-64.config
-  FEEDS_FILE: feeds/x86-64.txt
+  REPO_URL: https://github.com/LiBwrt/k6.18.git
+  REPO_BRANCH: dev
+  CONFIG_FILE: configs/x86-64-k6.18.config
   DIY_SCRIPT: diy-script.sh
-  FEEDS_DIY: feedsdiy.sh
-  ADD_FEEDS: add_feeds.sh
-  SET_DHCP: set_dhcp.sh
   CLASH_KERNEL: amd64
   CACHE_TOOLCHAIN: true
   UPLOAD_BIN_DIR: false
   FIRMWARE_RELEASE: true
-  FIRMWARE_TAG: X86-64
-  DOCKER_REPO: jessekool/immortalwrt_multiple_ethports  # Docker 仓库名称
-  DOCKER_TAG: latest                                    # Docker 镜像标签
+  FIRMWARE_TAG: X86-64-K6.18
   TZ: Asia/Shanghai
 
 jobs:
@@ -68,7 +62,8 @@ jobs:
     - name: Clone Source Code(克隆源代码)
       run: |
         df -hT $GITHUB_WORKSPACE
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        AUTH_REPO_URL=$(echo "$REPO_URL" | sed "s|://|://x-access-token:${{ secrets.REPO_TOKEN }}@|")
+        git clone "$AUTH_REPO_URL" -b "$REPO_BRANCH" openwrt
         cd openwrt
         echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
         VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
@@ -77,7 +72,6 @@ jobs:
     - name: Generate Variables(生成变量)
       run: |
         cp $CONFIG_FILE $OPENWRT_PATH/.config
-        cp $FEEDS_FILE $OPENWRT_PATH/feeds.conf.default
         cd $OPENWRT_PATH
         make defconfig > /dev/null 2>&1
         SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
@@ -95,22 +89,26 @@ jobs:
         mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
         prefix: ${{ env.OPENWRT_PATH }}
     
-    - name: Install Feeds&Fix Bugs&Apply Custom Settings(安装feeds&修复问题&应用自定义设置)
+    - name: Install Feeds(安装feeds)
       run: |
-        [ -e files ] && mv files $OPENWRT_PATH/files       
-        chmod +x $DIY_SCRIPT
-        chmod +x $FEEDS_DIY
-        chmod +x $ADD_FEEDS
-        bash $GITHUB_WORKSPACE/$ADD_FEEDS
-        bash $GITHUB_WORKSPACE/$SET_DHCP
         cd $OPENWRT_PATH
-        bash $GITHUB_WORKSPACE/$DIY_SCRIPT
         ./scripts/feeds update -a
+        git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall.git feeds/passwall
+        git clone --depth 1 https://github.com/breeze303/luci-app-lucky package/lucky
+        git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git package/nik
+        git clone --depth 1 https://github.com/QiuSimons/luci-app-daed package/dae
+        git clone --depth 1 https://github.com/sbwml/openwrt_pkgs.git
+        git clone --depth 1 https://github.com/eamonxg/luci-theme-aurora.git package/luci-theme-aurora
+        mkdir -p package/netspeedtest && mv openwrt_pkgs/luci-app-netspeedtest openwrt_pkgs/speedtest-cli package/netspeedtest/ && rm -rf openwrt_pkgs
+        rm -rf feeds/luci/applications/luci-app-passwall
+        rm -rf feeds/luci/applications/luci-app-daed
+        rm -rf feeds/packages/net/daed
+        mv feeds/passwall/luci-app-passwall feeds/luci/applications/
         ./scripts/feeds install -a
-        bash $GITHUB_WORKSPACE/$FEEDS_DIY
 
     - name: Load Custom Configuration(加载自定义配置)
       run: |
+        [ -e files ] && mv files $OPENWRT_PATH/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
 
     - name: Download DL Package(下载DL软件包)
@@ -120,11 +118,6 @@ jobs:
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
-        
-    - name: Set LLVM/clang Environment Variables
-      run: |
-        echo "CC=clang-12" >> $GITHUB_ENV
-        echo "CXX=clang++-12" >> $GITHUB_ENV
 
     - name: Compile Firmware(开始编译固件)
       id: compile
@@ -158,32 +151,6 @@ jobs:
         tar -zcf Packages.tar.gz packages
         rm -rf packages feeds.buildinfo version.buildinfo
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
-        
-    - name: Prepare Docker build context
-      run: |
-        mkdir -p docker/openwrt
-        FIRMWARE_PATH=$(find $OPENWRT_PATH/bin/targets -name "immortalwrt-x86-64-generic-rootfs.tar.gz" | head -n 1)
-        if [ -z "$FIRMWARE_PATH" ]; then
-          echo "Error: Firmware file not found!"
-          exit 1
-        fi
-        cp "$FIRMWARE_PATH" docker/openwrt/
-        echo "FROM scratch" > docker/openwrt/Dockerfile
-        echo "ADD $(basename "$FIRMWARE_PATH") /" >> docker/openwrt/Dockerfile
-        
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-    - name: Build and push Docker image
-      run: |
-        cd docker/openwrt
-        docker build -t ${{ env.DOCKER_REPO }}:${{ env.FILE_DATE }} .
-        docker push ${{ env.DOCKER_REPO }}:${{ env.FILE_DATE }}
-        docker tag ${{ env.DOCKER_REPO }}:${{ env.FILE_DATE }} ${{ env.DOCKER_REPO }}:latest
-        docker push ${{ env.DOCKER_REPO }}:latest
 
     - name: Upload Firmware To Artifact(将固件上传到Artifact)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
@@ -203,17 +170,14 @@ jobs:
         artifacts: ${{ env.FIRMWARE_PATH }}/*
         body: |
           **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
-          ### 📒 固件信息(X86-64)
-          - 这是immortalwrt-x86-64(6.6kernel) for docker
-          - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 immortalwrt 固件
+          ### 📒 固件信息(X86-64-K6.18) 测试版本
+          - 这是x86-64-6.18-kernel
+          - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 OpenWrt 固件
           - ⚽ 固件源码: ${{ env.REPO_URL }}
           - 💝 源码分支: ${{ env.REPO_BRANCH }}
-          - 🌐 默认地址: 192.168.6.1
+          - 🌐 默认地址: 192.168.1.1
           - 🔑 默认密码: password
           ### 🧊 固件版本
           - 固件内核版本：${{ env.VERSION_KERNEL }}
           - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
           - ${{ env.VERSION_INFO }}
-          - 固件同步推送至docker_hub仓库jessekool/immortalwrt_multiple_ethports
-          - docker用的带常用软件包的immortalwrt固件
-          - 使用方式请参考恩山帖子https://www.right.com.cn/forum/thread-8413705-1-1.html
